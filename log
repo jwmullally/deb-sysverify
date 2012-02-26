@@ -1,0 +1,169 @@
+Overall:
+
+- fsck system filesystem
+- Mount
+- manually sanity check /etc/apt/*
+    including gpg keys - important.
+- deb-sysverify.sh to pull down trusted package contents
+- dirdiff.sh to compare trusted package contents against system
+
+- Use system mkinitramfs to generate a comparison initramfs, compare to
+      one currently installed.
+- Manually sanity check /boot/grub/grub.cfg
+- grub-install to cow-mount and cowloop hdd mount for comparison
+      this will almost certainly be a big tool in and of itself.
+---
+
+
+Verify installed debian package contents
+Bootloader:
+    Verify initramdisk image
+    Verify grub (install grub to cowloop copy of harddrive, diff changes)
+
+Install test debian system:
+
+fakeroot fakechroot debootstrap --variant=fakechroot lucid test http://localhost:8100/ubuntu
+
+
+Can use apt-get on:
+    /etc/apt/sources.list               Dir::Etc::SourceList.
+    /etc/apt/sources.list.d/            Dir::Etc::SourceParts.
+    /etc/apt/apt.conf                   Dir::Etc::Main.
+    /etc/apt/apt.conf.d/                Dir::Etc::Parts.
+    /etc/apt/preferences                Dir::Etc::Preferences.
+    /etc/apt/preferences.d/             Dir::Etc::PreferencesParts.
+    /var/cache/apt/archives/            Dir::Cache::Archives.
+    /var/cache/apt/archives/partial/    Dir::Cache::Archives (implicit partial).
+    /var/lib/apt/lists/                 Dir::State::Lists.
+    /var/lib/apt/lists/partial/         Dir::State::Lists (implicit partial).
+
+Find package selection using:
+[http://lists.samba.org/archive/linux/2002-June/003399.html]
+For APT directory settings, see:
+    man apt.conf 
+    /usr/share/doc/apt/examples/configure-index.gz
+
+Want APT to read configuration from existing system, and store state and
+cached packages in new temp system.
+
+    #!/bin/bash
+
+    # Need absolute paths for most of this or else APT path mangling will 
+    # add extra prefixes
+
+    SYSDIR="/home/jman/code/deb-sysverify/test/"
+    WORKDIR="/home/jman/code/deb-sysverify/workdir/"
+
+    SRC_APT_ETC="$SYSDIR/etc/apt/"
+    SRC_DPKG_VAR="$SYSDIR/var/lib/dpkg/"
+
+    DPKG_TMPDIR="$WORKDIR/tmp-apt/var/lib/dpkg/"
+    DPKG_TMPSTATUS="$WORKDIR/tmp-apt/var/lib/dpkg/status"
+    APT_TMPDIR="$WORKDIR/tmp-apt/var/lib/apt/"
+    APT_CACHEDIR="$WORKDIR/tmp-apt/var/cache/apt/"
+    TMPROOT="$WORKDIR/test-root/"
+
+    mkdir -p "$DPKG_TMPDIR"
+    touch "$DPKG_TMPSTATUS"
+    mkdir -p "$APT_TMPDIR/lists"
+    mkdir -p "$APT_TMPDIR/lists/partial"
+    mkdir -p "$APT_CACHEDIR/archives/partial"
+
+    APT_OPTS="-o Dir::Etc=$SRC_APT_ETC 
+              -o Dir::State=$APT_TMPDIR
+              -o Dir::State::status=$DPKG_TMPSTATUS
+              -o Dir::Cache=$APT_CACHEDIR
+              --no-install-recommends"
+
+    DPKGLIST=`dpkg --admindir=$SRC_DPKG_VAR -l`
+    PKGS=`echo "$DPKGLIST" | grep "^ii" | awk '{print $2}'`
+    PKGSVERS=`echo "$DPKGLIST" | grep "^ii" | awk '{printf "%s=%s ",$2,$3}'`
+
+    echo "$PKGS"
+
+    apt-get $APT_OPTS update
+    apt-get $APT_OPTS -d install $PKGS
+
+    for pkg in $PKGS; do
+        echo "Extracting $pkg to test-root/"
+        dpkg --extract "$APT_CACHEDIR"/archives/${pkg}_*.deb $TMPROOT
+    done
+
+
+
+Then:
+    recursive "find" to enumerate all files and pipe through "diff --brief"
+
+---
+
+94 packages in minimal debootstrap, but apt-get wants to install 159...
+using no-install-recommends cuts this down.
+Still some extra dependancies, e.g. gawk.
+Solve by only extracting packages that are in original `dpkg -l` list
+(included above)
+
+---
+
+Excellent, have basic deb-sysverify.sh reading, downloading and extracting package lists.
+
+Now to diff the two directories.
+
+Comparing two symlinks:
+    http://stackoverflow.com/questions/1124416/how-to-compare-2-symbolic-links-in-unix-linux
+
+
+Created dirdiff.sh
+
+    #!/bin/bash
+
+    SYSDIR="/home/jman/code/deb-sysverify/test/"
+    WORKDIR="/home/jman/code/deb-sysverify/workdir/"
+    TMPROOT="$WORKDIR/test-root/"
+
+    LEN=${#TMPROOT}
+
+    TESTLIST=`find $TMPROOT -type f`
+
+    for f in $TESTLIST; do
+        diff --brief "$f" "$SYSDIR${f:LEN}" 
+    done
+
+
+Works for everything, except:
+    /sbin/ldconfig
+    /usr/bin/ldd
+
+Seem to be skeleton placeholders from the debootstrap install:
+debootstrap:  /sbin/ldconfig
+    #!/bin/sh
+    echo
+    echo "Warning: Fake ldconfig called, doing nothing"
+
+
+For comparing symlinks and permissions, do:
+
+Can compare directories using freebsd-mtree:
+    http://www.unix.com/man-page/FreeBSD/8/mtree/
+    freebsd-mtree -c > ../oldtree
+    cd <newtree>
+    freebsd-mtree -f ../oldtree
+
+Compares change times, links, attributes, etc
+
+Pretty good, except we don't want to pay attention to directory modification
+times.
+
+Need to process mtree with awk.
+
+First, for nicer processing, join long lines ending with \
+http://unix.stackexchange.com/questions/13676/how-can-you-combine-all-lines-that-end-with-a-backslash-character
+    awk '{if (sub(/\\$/,"")) printf "%s", $0; else print $0}'
+
+----
+
+Excellent. Have a nice dirdiff.sh script which compares two directory trees
+with freebsd-mtree and diff.
+
+Add command line paramaters and a help screen.
+
+
