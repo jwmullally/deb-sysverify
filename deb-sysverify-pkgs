@@ -1,0 +1,169 @@
+#!/bin/bash
+
+# deb-sysverify-pkgs
+# jwm Mar 2012
+
+# Need absolute paths for most of this or else APT path mangling will 
+# add extra prefixes
+# Can't decide whether uppercase or mixedcase vars are better.
+
+
+usage_exit()
+{
+    cat >&2 << EOF
+Usage $0 [OPTION] debian_fs_root [output_dir] [working_dir]
+
+Download original trusted copies of a Debian system's package contents for
+integrity checking and comparison.
+
+This tool uses dpkg to gets a list of all debian packages installed from
+the target filesystem. apt-get is used with the /etc/apt configuration
+from the target system to download the packages from the (hopefully)
+cryptographically trustworthy upstream repositories. Finally the package
+contents are extracted for later comparison.
+
+For securely integrity checking a root filesystem containing a 
+debian system:
+    - boot into a clean system (rescue CD etc)
+    - run fsck
+    - check /etc/apt/* and /var/lib/dpkg/* by hand
+    - [run this tool]
+    - compare downloaded binaries to system binaries.
+
+The most important things to check by hand are:
+    - package sources in /etc/apt/sources.list* 
+    - trusted repository keys /etc/apt/*.gpg*
+    - doublecheck 'apt-get_uris' in working_dir after running
+
+After this program has run, the output skeleton root filesystem
+containing the extracted package contents filesystem can then be
+compared against the original system with a file comparison tool, 
+such as 'deb-sysverify-dirdiff'.
+
+EOF
+    exit 1
+}
+
+
+if [ $# -lt 1 -o $# -gt 3 ]; then
+    usage_exit
+fi
+
+SysDir_Rel="$1"
+if [ $# -ge 2 ]; then
+    OutputDirRel="$2"
+else
+    OutputDirRel="pkgs-root"
+fi
+
+if [ $# -ge 3 ]; then
+    WorkDir_Rel="$3"
+else
+    WorkDir_Rel="pkgs-workdir"
+fi
+
+if [ ! -d "$SysDir_Rel" -o ! -d "$SysDir_Rel/etc/apt" \
+        -o ! -d "$SysDir_Rel/var/lib/dpkg" ]; then
+    echo -n "Error: '$SysDir_Rel' not a directory or doesn't contain "
+    echo    "/etc/apt or /var/lib/dpkg. Is this a valid Debian root filesystem?"
+    exit 1
+fi
+
+mkdir -p "$OutputDirRel"
+if [ ! -d "$OutputDirRel" -o ! -r "$OutputDirRel" -o ! -w "$OutputDirRel" \
+        -o ! -x "$OutputDirRel" -o "$OutputDirRel" = "$SysDir_Rel" ]; then
+    echo -n "Error: Can't create or read/write/execute output directory '$OutputDirRel',"
+    echo    " check permissions."
+    exit 1
+fi
+
+mkdir -p "$WorkDir_Rel"
+if [ ! -d "$WorkDir_Rel" -o ! -r "$WorkDir_Rel" -o ! -w "$WorkDir_Rel" \
+        -o ! -x "$WorkDir_Rel" -o "$WorkDir_Rel" = "$SysDir_Rel" ]; then
+    echo -n "Error: Can't create or read/write/execute working directory '$WorkDir_Rel',"
+    echo    " check permissions."
+    exit 1
+fi
+
+
+# Convert directory arguments to absolute paths
+SysDir="`cd "$SysDir_Rel"; pwd`"
+OutputDir="`cd "$OutputDirRel"; pwd`"
+WorkDir="`cd "$WorkDir_Rel"; pwd`"
+
+echo "$SysDir"
+echo "$OutputDir"
+echo "$WorkDir"
+
+SRC_APT_ETC="$SysDir/etc/apt/"
+SRC_DPKG_VAR="$SysDir/var/lib/dpkg/"
+
+DPKG_TMPDIR="$WorkDir/var/lib/dpkg/"
+DPKG_TMPSTATUS="$WorkDir/var/lib/dpkg/status"
+APT_TMPDIR="$WorkDir/var/lib/apt/"
+APT_CACHEDIR="$WorkDir/var/cache/apt/"
+
+mkdir -p "$DPKG_TMPDIR"
+touch "$DPKG_TMPSTATUS"
+mkdir -p "$APT_TMPDIR/lists/partial"
+mkdir -p "$APT_CACHEDIR/archives/partial"
+
+# Figure out the target architecture, otherwise apt-get will use the hosts.
+TargetArchs=`cat "$SRC_DPKG_VAR/status" | grep "^Architecture: " | grep -v "^Architecture: all$" | uniq`
+NArchs=`echo "$TargetArchs" | wc -l`
+if [ "$NArchs" -ne 1 ]; then
+  echo "Error: Packages installed from multiple architectures:"
+  echo "$TargetArchs"
+  echo "This script will have to be updated to handle this."
+  exit
+fi
+TargetArch=`echo "$TargetArchs" | cut --delimiter=' ' --fields=2`
+echo "Target architecture: $TargetArch"
+echo
+
+APT_OPTS="-o Dir::Etc=\"$SRC_APT_ETC\"
+          -o Dir::State=\"$APT_TMPDIR\"
+          -o Dir::State::status=\"$DPKG_TMPSTATUS\"
+          -o Dir::Cache=\"$APT_CACHEDIR\"
+          -o APT::Architecture=$TargetArch"
+
+DPKGLIST=`dpkg --admindir="$SRC_DPKG_VAR" --list`
+PKGS=`echo "$DPKGLIST" | grep "^ii" | awk '{print $2}'`
+PKGSVERS=`echo "$DPKGLIST" | grep "^ii" | awk '{printf "%s=%s ",$2,$3}'`
+
+# Use 'eval' to handle passing quoted directory args in ARG_OPTS properly.
+eval apt-get $APT_OPTS update
+echo
+
+# apt-get will error out if it tries to install unavailable packages.
+# Adding --ignore-missing doesn't work for download only.
+# (Debian bug: #409904, Ubuntu bug: #512190, #844196)
+# ==> Check each package availability manually
+
+# Dump to a temp file as using "echo $VAR | grep" with large variables is very 
+# slow. cat + tmp files use faster fd redirection and OS cache.
+AptDumpTemp=`mktemp --tmpdir deb-sysverify-pkgs.XXXXXXXXXX`
+eval apt-cache $APT_OPTS dump > "$AptDumpTemp"
+for pkgver in $PKGSVERS; do
+    pkg=`echo $pkgver | cut --delimiter== --fields=1`
+    ver=`echo $pkgver | cut --delimiter== --fields=2`
+    cat "$AptDumpTemp" \
+        | grep --after-context=4096 --line-regexp "^Package: $pkg" \
+        | grep --before-context=4096 --max-count=2 "^Package:" \
+        | grep --line-regexp " Version: $ver" > /dev/null
+    if [ $? -eq 0 ]; then
+        PKGVERS2="$PKGVERS2 $pkgver"
+    else
+        echo "  Can't find package in any repository, skipping:    $pkgver"
+    fi
+done
+rm -f "$AptDumpTemp"
+
+# Download and extract the packages
+eval apt-get $APT_OPTS --no-install-recommends --print-uris --yes install $PKGVERS2 > pkgs_uris
+eval apt-get $APT_OPTS --no-install-recommends --download-only  install $PKGVERS2
+echo
+for pkg in $PKGS; do
+    echo "Extracting $pkg"
+    dpkg --extract "$APT_CACHEDIR"/archives/${pkg}_*.deb "$OutputDir"
+done

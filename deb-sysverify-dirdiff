@@ -1,0 +1,135 @@
+#!/bin/bash
+
+# deb-sysverify-dirdiff
+# jwm Mar 2012
+
+usage_exit()
+{
+    cat >&2 << EOF
+
+Usage $0 [OPTION] [target-directory] [reference-directory]
+
+Compare the attributes and contents of all files and directories in a
+target directory against a reference directory using mtree and diff.
+
+This tool does not compare extended filesystem attributes.
+
+By default, writes comparison results out to:
+  diff_binary, diff_attrib, diff_extra, diff_missing.
+
+Options:
+  -p [result_prefix]    Directory/file prefix to prepend to the output 
+                        results.
+                        Eg. "-p /tmp/results-" will write all output
+                        to /tmp/results-binary ...
+
+EOF
+    exit 1
+}
+
+RefDir=""
+TargetDir=""
+OutputPrefix=""
+
+while getopts "hp:" flag; do
+    case "$flag" in
+        p)  
+            OutputPrefix="$OPTARG"
+            ;;
+        h|?)
+            usage_exit
+            ;;
+    esac
+done
+shift $(expr $OPTIND - 1)
+
+if [ $# -ne 2 ]; then
+    usage_exit
+fi
+
+TargetDir="$1/"
+RefDir="$2/"
+
+echo
+echo "Comparing all files and directories in reference directory"
+echo "    $RefDir"
+echo "to corresponding files in target directory"
+echo "    $TargetDir"
+echo
+
+# File attribute comparison
+
+# Use mtree to collect attributes for the two directory trees.
+# By default mtree compares: flags, gid, mode, nlink, size, link, time, and uid
+# Remove modification time as it tends to add alot of noise when the files
+# haven't "really" changed. Binary diffs will show if a file has been modified.
+
+# MTree is an extra dependancy. Consider replacing with a bash function
+# that does the same thing.
+
+echo "Comparing file and directory attributes using MTree..."
+echo
+
+MTreeKeywords="flags,gid,mode,nlink,size,link,uid"
+MTree=$(freebsd-mtree -k $MTreeKeywords -c -p "$RefDir")
+# Join long lines ending with \<newline>
+#MTree2=$(echo "$MTree" \
+#            | awk '{if (sub(/\\$/,"")) printf "%s", $0; else print $0}')
+# Remove "time=" stamps from directories. They change anyway and only adds noise.
+#MTree3=$(echo "$MTree2" \
+#             | awk '{   printf "%s ", $1; 
+#                        d = 0; 
+#                        for(col=2; col<=NF; col++)
+#                            if ( $col == "type=dir" )
+#                                d = 1;
+#                        for(col=2; col<=NF; col++)
+#                            if ( !(d == 1 && $col ~ /^time=/) )
+#                                printf "%s ", $col;
+#                        print "";   }')
+
+#MTreeDIFF=$(echo "$MTree3" | freebsd-mtree -p "$TargetDir")
+MTreeDIFF=$(echo "$MTree" | freebsd-mtree -p "$TargetDir")
+echo "Writing attributes to '${OutputPrefix}diff_attrib'."
+AttribChanges=$(echo "$MTreeDIFF" | grep --invert-match " extra$\| missing$")
+echo "$AttribChanges" > "${OutputPrefix}diff_attrib"
+NAttribChanges=$(echo "$AttribChanges" | grep "^[^[:space:]]" | wc -l)
+echo "--> $NAttribChanges files with different attributes."
+echo
+
+MissingFiles=$(echo "$MTreeDIFF" | grep " missing$" \
+                | rev | cut --delimiter=" " --fields=2- | rev)
+echo "Writing missing file list to '${OutputPrefix}diff_missing'."
+echo "$MissingFiles" > "${OutputPrefix}diff_missing"
+NMissingFiles=$(echo "$MissingFiles" | wc -l)
+echo "--> $NMissingFiles files in reference missing from target."
+echo
+
+
+# We get a list of extra files for free, so save them if wanted.
+ExtraFiles=$(echo "$MTreeDIFF" | grep " extra$" \
+                | rev | cut --delimiter=" " --fields=2- | rev)
+echo "Writing extra file list to '${OutputPrefix}diff_extra'."
+echo "$ExtraFiles" > "${OutputPrefix}diff_extra"
+NExtraFiles=$(echo "$ExtraFiles" | wc -l)
+echo "--> $NExtraFiles extra files in target not in reference."
+echo
+
+
+echo "Comparing file binary contents using diff..."
+echo
+echo "Writing differing files to '${OutputPrefix}diff_binary'."
+
+rm -f "${OutputPrefix}diff_binary"
+find "$RefDir" -type f | while read file; do
+    if [ ! -e "$TargetDir${file:${#RefDir}}" ]; then
+        continue        # Skip missing files we found above.
+    fi
+    diff --brief "$file" "$TargetDir${file:${#RefDir}}" \
+        >> "${OutputPrefix}diff_binary"
+done
+NBinaryChanges=$(cat "${OutputPrefix}diff_binary" | wc -l)
+echo "--> $NBinaryChanges files with different content."
+
+echo
+echo "Done."
+echo

@@ -1,0 +1,85 @@
+#!/bin/sh
+
+# deb-sysverify-initrd
+# jwm Mar 2012
+
+WorkDir="`pwd`/verify-initrd/"
+
+mkdir -p "$OutputDir"
+if [ ! -d "$OutputDir" -o ! -r "$OutputDir" -o ! -w "$OutputDir" \
+        -o ! -x "$OutputDir" ]; then
+    echo -n "Error: Can't create or read/write/execute output directory "
+    echo    " '$OutputDir', check permissions."
+    exit 1
+fi
+
+#BaseDir="/home/jman/code/deb-sysverify/test/"
+# Get the absolute directory path for this.
+BaseDir="/"
+
+InitRamVar="/var/lib/initramfs-tools/"
+InitRamScript="/usr/sbin/update-initramfs"
+
+# Mount tmpfs's over all the directories we will need to write to.
+# We want to avoid modifying the filesystem under examination if possible.
+# Mounting over "/tmp/" causes problems if we are using this script
+# on a running system (e.g. localhost).
+# This will be restored at the end of the script.
+TmpfsMntDir="/mnt"
+
+BaseTemp="$BaseDir/$TmpfsMntDir"
+echo -n "Chrooting to '$BaseDir' and generating initramfs images to tmpfs "
+echo -e "(mounted over '$BaseTemp')...\n"
+
+mount -t tmpfs tmpfs "$BaseTemp"
+if [ $? -ne 0 ]; then
+    echo -n "Unable to mount tmpfs over '$BaseTemp' needed for initrd image "
+    echo    "creation. Exiting..."
+    exit 1
+fi
+
+TempBoot="$BaseTemp/boot/"
+TempVar="$BaseTemp/var-lib-initramfs-tools/"
+TempBootChroot="$TmpfsMntDir/boot/"
+
+mkdir -p "$TempBoot"
+
+cp -a "$BaseDir/$InitRamVar/" "$TempVar"
+mount -t tmpfs tmpfs "$BaseDir/$InitRamVar"
+if [ $? -ne 0 ]; then
+    echo -n "Unable to mount tmpfs over '$BaseDir/$InitRamVar' "
+    echo    "needed for initrd image creation. Exiting..."
+    umount "$BaseTemp"
+    exit 1
+fi
+cp -a "$TempVar"/* "$BaseDir/$InitRamVar/" 
+
+# While fakechroot would be nice, it unfortunately introduces extra files into
+# the generated initrd images, like usr/lib/fakechroot and usr/lib/libfakeroot.
+# Use real chroot instead.
+chroot "$BaseDir" "$InitRamScript" -k all -c -b "$TempBootChroot"
+echo
+
+# Extract the generated images
+for infile in "$TempBoot"/initrd.*; do
+    echo "Extracting generated `basename $infile`..."
+    mkdir "$infile.generated"
+    cd "$infile.generated"
+    cat "$infile" | gunzip | cpio -id --preserve-modification-time
+
+    echo "Extracting system current `basename $infile`..."
+    mkdir "$infile.current"
+    cd "$infile.current"
+    cat "$BaseDir/boot/`basename $infile`" | gunzip | cpio -id --preserve-modification-time
+done
+
+echo -e "\nCopying initrd images and contents from tmpfs to '$OutputDir'..."
+cp -a "$BaseTemp"/boot/* "$OutputDir"
+
+cd /
+
+echo "Removing tmpfs mounts..."
+umount -t tmpfs "$BaseDir/$InitRamVar"
+umount -t tmpfs "$BaseTemp"
+
+echo "Done."
