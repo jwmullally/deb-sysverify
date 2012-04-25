@@ -164,6 +164,70 @@ http://unix.stackexchange.com/questions/13676/how-can-you-combine-all-lines-that
 Excellent. Have a nice dirdiff.sh script which compares two directory trees
 with freebsd-mtree and diff.
 
-Add command line paramaters and a help screen.
+[  ] Add command line paramaters and a help screen.
+
+----
+
+Unit test:
+[   ] Automated debian install with rootkit infection.
+
+Use debian preseeding with minimal netinstall
+http://www.debian.org/releases/stable/i386/apbs02.html.en
+--> can use Qemu linux image and initrd image command line options to make this easy
+    Extract them from the ISO, and make preseed file point to floppy.
+
+-----
+
+made a nice initramfs generator and extractor, initramfs-verify.sh
+
+-----
+
+Add statistics to dirdiff tool.
+How many files with attributes changed.
+How many extra files
+How many binary differences.
+
+
+----
+
+apt-get download-only --ignore-missing still fails when a package can't be found.
+Need to manually grep through
+    apt-cache dump
+and filter using multiline grep
+
+
+http://stackoverflow.com/questions/3717772/regex-grep-for-multi-line-search-needed
+
+cat dump | sed -n '/^Package: w3m$/,/^Package:/p' | grep " Version: 0.5.2-2.1ubuntu1.1"
+=> if $? == 0: package is available, if not is unavailable
+==> dump is 24M big, sed is slow:
+    real    0m0.184s
+
+cat dump | grep -A4096 -x "Package: w3m" | grep -B4096 -m2 "^Package:" | grep -x " Version: 0.5.2-2.1ubuntu1.1"
+==> real    0m0.010s
+
+
+
+Problem:
+
+Dump=$(cat dump)
+time echo "$Dump" > /dev/null
+==> real    0m6.083s
+
+Dump=$(cat dump | grep "^Package:\|^ Version:")
+time echo "$Dump" > /dev/null
+==> real    0m0.588s
+
+Still very slow if doing multiple greps...
+No real answer on why this is.
+This seems to suggest converting variable to and from string with spaces before echoing is an expensive operation, compared to filediscriptor redirection available by cat.
+http://superuser.com/questions/279141/why-is-reading-a-file-faster-than-reading-a-variable
+
+Make a temp file and use cat. Fast, uses file descriptors and OS cache.
+
+
+
+
+
 
 

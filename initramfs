@@ -1,0 +1,15 @@
+Verifying initramfs images.
+
+
+Copy /usr/sbin/initramfs to localdir
+
+copy /var/lib/initramfs-tools top local dir
+replace /var/lib/initramfs-tools with local dir
+
+export FAKECHROOT_EXCLUDE_PATH=/tmp
+
+use "mktemp -d"
+
+fakeroot fakechroot /usr/sbin/chroot /home/jman/code/deb-sysverify/test /bin/bash
+
+Seems to run ok, but no installed kernels under debootstrap
